@@ -253,6 +253,12 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 						adjustmentFailed = true
 					}
 				}
+				if session.GetMute() != event.MuteStatus{
+					if err := session.SetMute(event.MuteStatus); err != nil{
+						m.logger.Warnw("Failed to set target session mute", "error", err)
+						adjustmentFailed = true
+					}
+				}
 			}
 		}
 	}
