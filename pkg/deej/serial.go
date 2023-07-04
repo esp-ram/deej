@@ -31,6 +31,7 @@ type SerialIO struct {
 
 	lastKnownNumSliders        int
 	currentSliderPercentValues []float32
+	currentSliderMuteStatus    []bool
 
 	sliderMoveConsumers []chan SliderMoveEvent
 }
@@ -39,6 +40,7 @@ type SerialIO struct {
 type SliderMoveEvent struct {
 	SliderID     int
 	PercentValue float32
+	MuteStatus   bool
 }
 
 var expectedLinePattern = regexp.MustCompile(`^\d{1,4}(\|\d{1,4})*\r\n$`)
@@ -240,13 +242,14 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 
 	// split on pipe (|), this gives a slice of numerical strings between "0" and "1023"
 	splitLine := strings.Split(line, "|")
-	numSliders := len(splitLine)
+	numSliders := len(splitLine) / 2
 
 	// update our slider count, if needed - this will send slider move events for all
 	if numSliders != sio.lastKnownNumSliders {
 		logger.Infow("Detected sliders", "amount", numSliders)
 		sio.lastKnownNumSliders = numSliders
 		sio.currentSliderPercentValues = make([]float32, numSliders)
+		sio.currentSliderMuteStatus = make([]bool, numSliders)
 
 		// reset everything to be an impossible value to force the slider move event later
 		for idx := range sio.currentSliderPercentValues {
@@ -256,14 +259,21 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 
 	// for each slider:
 	moveEvents := []SliderMoveEvent{}
-	for sliderIdx, stringValue := range splitLine {
+	for i := 0; i < numSliders; i++ {
 
 		// convert string values to integers ("1023" -> 1023)
-		number, _ := strconv.Atoi(stringValue)
+		number, _ := strconv.Atoi(splitLine[i])
+		mute, _ := strconv.Atoi(splitLine[i+numSliders])
+
+		if mute < 0 || mute > 1 {
+			sio.logger.Debugw("Got malformed line from serial, ignoring", "line", line)
+			return
+		}
+		muteBool := mute == 1
 
 		// turns out the first line could come out dirty sometimes (i.e. "4558|925|41|643|220")
 		// so let's check the first number for correctness just in case
-		if sliderIdx == 0 && number > 1023 {
+		if i == 0 && number > 1023 {
 			sio.logger.Debugw("Got malformed line from serial, ignoring", "line", line)
 			return
 		}
@@ -280,14 +290,18 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 		}
 
 		// check if it changes the desired state (could just be a jumpy raw slider value)
-		if util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
+		volumeChanged := util.SignificantlyDifferent(sio.currentSliderPercentValues[i], normalizedScalar, sio.deej.config.NoiseReductionLevel)
+		muteChanged := sio.currentSliderMuteStatus[i] != muteBool
+		if volumeChanged || muteChanged {
 
 			// if it does, update the saved value and create a move event
-			sio.currentSliderPercentValues[sliderIdx] = normalizedScalar
+			sio.currentSliderPercentValues[i] = normalizedScalar
+			sio.currentSliderMuteStatus[i] = muteBool
 
 			moveEvents = append(moveEvents, SliderMoveEvent{
-				SliderID:     sliderIdx,
+				SliderID:     i,
 				PercentValue: normalizedScalar,
+				MuteStatus:   muteBool,
 			})
 
 			if sio.deej.Verbose() {
